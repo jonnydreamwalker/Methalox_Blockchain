@@ -28,3 +28,10 @@ This guide will help you set up and run a MethaloxChain validator node. The proc
 From your local computer (Mac/Windows/Linux):
 ```bash
 ssh ubuntu@YOUR_PUBLIC_IP
+
+The deployment instructions in this guide use Oracle Cloud Infrastructure (OCI) as an example provider due to its cost-effectiveness and compatibility with MethaloxChain node requirements. This is provided solely for illustrative purposes to demonstrate a typical setup process.
+MethaloxChain nodes can be deployed on any compatible Linux-based server (cloud provider or dedicated hardware) that meets the system requirements and does not prohibit blockchain node operation in its terms of service.
+Users are responsible for reviewing the provider's acceptable use policy to ensure compliance, as some providers restrict blockchain-related activities.
+This flexibility supports broad accessibility and decentralization of the MethaloxChain network.
+You can copy-paste this note directly into your DEPLOYMENT_GUIDE.md or README.md.
+Charge hot — note updated for accuracy. 
