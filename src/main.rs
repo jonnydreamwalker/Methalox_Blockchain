@@ -1,6 +1,7 @@
 // בָּרוּךְ שֵׁם יֵשׁוּעַ הַמָּשִׁיחַ
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,7 @@ use libp2p::{
 };
 use libp2p::core::upgrade;
 
+use tokio::signal;
 use tokio::time;
 
 use bincode;
@@ -31,11 +33,11 @@ use schnorrkel::{
     vrf::{VRFOutput, VRFProof},
 };
 
-use ed25519_dalek as dalek; // Crate alias — crushes all shadowing
-use dalek::{Signature, Verifier};
-use dalek::VerifyingKey as EdPublicKey; // v2.2.0 uses VerifyingKey for public key
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use jsonrpsee::server::{ServerBuilder, RpcModule};
+
+const STATE_FILE: &str = "chain_state.bin";
 
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
 const TX_FEE_BPS: u64 = 10; // 0.1%
@@ -78,7 +80,19 @@ struct Block {
     vrf_output: Vec<u8>,
 }
 
-#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct MethaloxChainState {
+    blocks: Vec<Block>,
+    balances: HashMap<String, HashMap<String, (u64, u64)>>,
+    treasury: HashMap<String, u64>,
+    xsx_circulating: u64,
+    tx_pool: Vec<Transaction>,
+    validators: HashSet<String>,
+    staked: HashMap<String, u64>,
+    vrf_public_keys: HashMap<String, Vec<u8>>,
+    node_vrf_public_bytes: Vec<u8>,
+}
+
 struct MethaloxChain {
     blocks: Vec<Block>,
     balances: HashMap<String, HashMap<String, (u64, u64)>>,
@@ -151,6 +165,54 @@ impl MethaloxChain {
         }
     }
 
+    fn from_state(state: MethaloxChainState, node_secret_seed: [u8; 32], node_address: String) -> Self {
+        let mini_secret = MiniSecretKey::from_bytes(&node_secret_seed).unwrap();
+        let node_secret = mini_secret.expand(ExpansionMode::Ed25519);
+        let node_vrf_public = node_secret.to_public();
+
+        let mut vrf_public_keys = HashMap::new();
+        for (addr, bytes) in state.vrf_public_keys {
+            let pk = PublicKey::from_bytes(&bytes).expect("Invalid saved VRF public key");
+            vrf_public_keys.insert(addr, pk);
+        }
+
+        // Validate saved node VRF key matches regenerated
+        assert_eq!(node_vrf_public.to_bytes().to_vec(), state.node_vrf_public_bytes);
+
+        Self {
+            blocks: state.blocks,
+            balances: state.balances,
+            treasury: state.treasury,
+            xsx_circulating: state.xsx_circulating,
+            tx_pool: state.tx_pool,
+            validators: state.validators,
+            staked: state.staked,
+            vrf_public_keys,
+            node_address,
+            node_secret,
+            node_vrf_public,
+        }
+    }
+
+    fn to_state(&self) -> MethaloxChainState {
+        let mut vrf_bytes = HashMap::new();
+        for (addr, pk) in &self.vrf_public_keys {
+            vrf_bytes.insert(addr.clone(), pk.to_bytes().to_vec());
+        }
+
+        MethaloxChainState {
+            blocks: self.blocks.clone(),
+            balances: self.balances.clone(),
+            treasury: self.treasury.clone(),
+            xsx_circulating: self.xsx_circulating,
+            tx_pool: self.tx_pool.clone(),
+            validators: self.validators.clone(),
+            staked: self.staked.clone(),
+            vrf_public_keys: vrf_bytes,
+            node_vrf_public_bytes: self.node_vrf_public.to_bytes().to_vec(),
+        }
+    }
+
     fn hash_block(block: &Block) -> String {
         let mut temp = block.clone();
         temp.hash = String::new();
@@ -209,7 +271,7 @@ impl MethaloxChain {
             .map_err(|_| "Invalid from address (hex)")?
             .try_into()
             .map_err(|_| "Invalid public key length")?;
-        let public_key = EdPublicKey::from_bytes(&pubkey_bytes).map_err(|_| "Invalid public key")?;
+        let public_key = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| "Invalid public key")?;
 
         public_key.verify(&message, &signature).map_err(|_| "Invalid signature")?;
 
@@ -274,7 +336,6 @@ impl MethaloxChain {
             return None;
         }
 
-        // Snapshot to avoid borrow conflict
         let tx_pool_snapshot = self.tx_pool.clone();
         self.tx_pool.clear();
 
@@ -414,6 +475,25 @@ impl MethaloxChain {
             }
         }
     }
+
+    fn save_to_disk(&self) {
+        let state = self.to_state();
+        if let Ok(encoded) = bincode::serialize(&state) {
+            let _ = fs::write(STATE_FILE, encoded);
+            println!("Chain state saved to {}", STATE_FILE);
+        }
+    }
+}
+
+fn load_chain(node_address: String, node_secret_seed: [u8; 32]) -> MethaloxChain {
+    if let Ok(data) = fs::read(STATE_FILE) {
+        if let Ok(state) = bincode::deserialize::<MethaloxChainState>(&data) {
+            println!("Chain state loaded from {}", STATE_FILE);
+            return MethaloxChain::from_state(state, node_secret_seed, node_address);
+        }
+    }
+    println!("No saved state found — starting fresh genesis");
+    MethaloxChain::new(node_address, node_secret_seed)
 }
 
 // RPC Interface for Transaction Submission — PUBLIC BIND
@@ -422,35 +502,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
     let node_secret_seed = [42u8; 32];
 
-    let chain = Arc::new(Mutex::new(MethaloxChain::new(node_address.clone(), node_secret_seed)));
+    let chain = Arc::new(Mutex::new(load_chain(node_address.clone(), node_secret_seed)));
 
-    // Start RPC server — PUBLIC BIND
     let rpc_chain = chain.clone();
+
     tokio::spawn(async move {
         let server = ServerBuilder::default().build("0.0.0.0:9933").await.unwrap();
-        let mut module = RpcModule::new(()); // () for jsonrpsee 0.16+
-        let _ = module.register_async_method("submit_tx", {
+        let mut module = RpcModule::new(());
+        let _ = module.register_async_method("submit_tx", move |params, _| {
             let rpc_chain = rpc_chain.clone();
-            move |params, _| {
-                let rpc_chain = rpc_chain.clone(); // Nested clone fixes E0507
-                Box::pin(async move {
-                    let tx_bytes = match params.one::<Vec<u8>>() {
-                        Ok(b) => b,
-                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid params".to_string())),
-                    };
-                    let chain = rpc_chain.clone();
-                    let chain_guard = chain.lock().unwrap();
-                    let tx: Transaction = match bincode::deserialize(&tx_bytes) {
-                        Ok(t) => t,
-                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
-                    };
-                    if let Err(e) = chain_guard.validate_tx(&tx) {
-                        return Err(jsonrpsee::core::Error::Custom(e));
-                    }
-                    drop(chain_guard);
-                    chain.lock().unwrap().tx_pool.push(tx);
-                    Ok("Transaction submitted successfully".to_string())
-                })
+            async move {
+                let tx_bytes: Vec<u8> = params.one()?;
+                let mut chain_guard = rpc_chain.lock().unwrap();
+                let tx: Transaction = bincode::deserialize(&tx_bytes)
+                    .map_err(|_| jsonrpsee::core::Error::Custom("Invalid transaction format".to_string()))?;
+                if let Err(e) = chain_guard.validate_tx(&tx) {
+                    return Err(jsonrpsee::core::Error::Custom(e));
+                }
+                chain_guard.tx_pool.push(tx);
+                Ok("Transaction submitted successfully".to_string())
             }
         });
         server.start(module).unwrap();
@@ -470,7 +540,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .heartbeat_interval(Duration::from_secs(10))
         .build()?;
 
-    let mut behaviour: gossipsub::Behaviour<IdentityTransform> = gossipsub::Behaviour::new(
+    let mut behaviour = gossipsub::Behaviour::<IdentityTransform>::new(
         MessageAuthenticity::Signed(local_key.clone()),
         gossipsub_config,
     )?;
@@ -486,6 +556,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic_clone = topic.clone();
 
     let mut interval = time::interval(Duration::from_secs(1));
+
+    let save_chain = chain.clone();
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        println!("Shutting down — saving chain state...");
+        save_chain.lock().unwrap().save_to_disk();
+        std::process::exit(0);
+    });
 
     loop {
         tokio::select! {
