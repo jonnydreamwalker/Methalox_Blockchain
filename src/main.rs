@@ -31,6 +31,8 @@ use schnorrkel::{
     vrf::{VRFOutput, VRFProof},
 };
 
+use jsonrpsee::server::{ServerBuilder, RpcModule};
+
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
 const TX_FEE_BPS: u64 = 10; // 0.1%
 const SUPPLY_CAP: u64 = 105_000_000_000;
@@ -39,11 +41,17 @@ const FOUNDER_ADDRESS: &str = "0x0e5f08ed743d1c6d9745f590e9850fd5169d8be2";
 const XSX_BURN_RATE: f64 = 0.999; // 99.9% burn on founder XSX rake
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+enum TransactionKind {
+    Transfer,
+    Stake { amount: u64, vrf_pubkey: Vec<u8> },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Transaction {
     from: String,
     to: String,
     amount: u64,
-    kind: String,
+    kind: TransactionKind,
     signature: String,
     timestamp: u64,
     commitment: String,
@@ -216,13 +224,65 @@ impl MethaloxChain {
 
         let txs = self.tx_pool.drain(..).collect::<Vec<_>>();
 
-        let mut fees_this_block = HashMap::new();
+        // Process staking transactions
         for tx in &txs {
-            let fee = tx.amount * TX_FEE_BPS / 10000;
-            *fees_this_block.entry(tx.asset.clone()).or_insert(0) += fee;
+            if let TransactionKind::Stake { amount, vrf_pubkey } = &tx.kind {
+                if tx.asset == "XSX" && tx.from == tx.to {
+                    let balance = self.balances
+                        .get(&tx.from)
+                        .and_then(|m| m.get("XSX"))
+                        .copied()
+                        .unwrap_or(0);
+                    if balance >= *amount {
+                        *self.balances
+                            .entry(tx.from.clone())
+                            .or_insert(HashMap::new())
+                            .entry("XSX".to_string())
+                            .or_insert(0) -= amount;
+                        *self.staked.entry(tx.from.clone()).or_insert(0) += amount;
+                        if let Ok(pubkey) = PublicKey::from_bytes(vrf_pubkey) {
+                            self.vrf_public_keys.insert(tx.from.clone(), pubkey);
+                        }
+                        self.validators.insert(tx.from.clone());
+                        println!("Validator {} staked {} XSX", tx.from, amount);
+                    }
+                }
+            }
         }
 
-        // Dynamic tail emission with ±5% band
+        // Process transfers
+        for tx in &txs {
+            if matches!(tx.kind, TransactionKind::Transfer) {
+                let balance = self.balances
+                    .get(&tx.from)
+                    .and_then(|m| m.get(&tx.asset))
+                    .copied()
+                    .unwrap_or(0);
+                let fee = tx.amount * TX_FEE_BPS / 10000;
+                if balance >= tx.amount + fee {
+                    *self.balances
+                        .entry(tx.from.clone())
+                        .or_insert(HashMap::new())
+                        .entry(tx.asset.clone())
+                        .or_insert(0) -= tx.amount + fee;
+                    *self.balances
+                        .entry(tx.to.clone())
+                        .or_insert(HashMap::new())
+                        .entry(tx.asset.clone())
+                        .or_insert(0) += tx.amount;
+                    println!("Transferred {} {} from {} to {}", tx.amount, tx.asset, tx.from, tx.to);
+                }
+            }
+        }
+
+        let mut fees_this_block = HashMap::new();
+        for tx in &txs {
+            if !matches!(tx.kind, TransactionKind::Stake { .. }) {
+                let fee = tx.amount * TX_FEE_BPS / 10000;
+                *fees_this_block.entry(tx.asset.clone()).or_insert(0) += fee;
+            }
+        }
+
         let tail_reward = if self.xsx_circulating < LOWER_THRESHOLD {
             Self::TAIL_REWARD
         } else if self.xsx_circulating < SUPPLY_CAP {
@@ -253,7 +313,6 @@ impl MethaloxChain {
             println!("BLOCK PRODUCED #{} by {}", new_block.index, new_block.validator);
             self.blocks.push(new_block.clone());
 
-            // Tail reward to validator (full)
             if tail_reward > 0 {
                 *self.balances
                     .entry(self.node_address.clone())
@@ -263,12 +322,10 @@ impl MethaloxChain {
                 self.xsx_circulating += tail_reward;
             }
 
-            // Fee split: 50% validator (full), 50% founder rake (burn on XSX)
             for (asset, total_fee) in fees_this_block {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
 
-                // Validator: 50% full
                 *self.balances
                     .entry(self.node_address.clone())
                     .or_insert(HashMap::new())
@@ -306,7 +363,6 @@ impl MethaloxChain {
             println!("Accepted incoming block {} from network (validator: {})", block.index, block.validator);
             self.blocks.push(block.clone());
 
-            // Tail reward to validator (full)
             if block.tail_reward > 0 {
                 *self.balances
                     .entry(block.validator.clone())
@@ -316,12 +372,61 @@ impl MethaloxChain {
                 self.xsx_circulating += block.tail_reward;
             }
 
-            // Fee split: 50% validator (full), 50% founder rake (burn on XSX)
+            // Process staking transactions
+            for tx in &block.transactions {
+                if let TransactionKind::Stake { amount, vrf_pubkey } = &tx.kind {
+                    if tx.asset == "XSX" && tx.from == tx.to {
+                        let balance = self.balances
+                            .get(&tx.from)
+                            .and_then(|m| m.get("XSX"))
+                            .copied()
+                            .unwrap_or(0);
+                        if balance >= *amount {
+                            *self.balances
+                                .entry(tx.from.clone())
+                                .or_insert(HashMap::new())
+                                .entry("XSX".to_string())
+                                .or_insert(0) -= amount;
+                            *self.staked.entry(tx.from.clone()).or_insert(0) += amount;
+                            if let Ok(pubkey) = PublicKey::from_bytes(vrf_pubkey) {
+                                self.vrf_public_keys.insert(tx.from.clone(), pubkey);
+                            }
+                            self.validators.insert(tx.from.clone());
+                            println!("Applied stake {} XSX for validator {}", amount, tx.from);
+                        }
+                    }
+                }
+            }
+
+            // Process transfers
+            for tx in &block.transactions {
+                if matches!(tx.kind, TransactionKind::Transfer) {
+                    let balance = self.balances
+                        .get(&tx.from)
+                        .and_then(|m| m.get(&tx.asset))
+                        .copied()
+                        .unwrap_or(0);
+                    let fee = tx.amount * TX_FEE_BPS / 10000;
+                    if balance >= tx.amount + fee {
+                        *self.balances
+                            .entry(tx.from.clone())
+                            .or_insert(HashMap::new())
+                            .entry(tx.asset.clone())
+                            .or_insert(0) -= tx.amount + fee;
+                        *self.balances
+                            .entry(tx.to.clone())
+                            .or_insert(HashMap::new())
+                            .entry(tx.asset.clone())
+                            .or_insert(0) += tx.amount;
+                        println!("Applied transfer {} {} from {} to {}", tx.amount, tx.asset, tx.from, tx.to);
+                    }
+                }
+            }
+
             for (asset, total_fee) in block.fees_collected {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
 
-                // Validator: 50% full
                 *self.balances
                     .entry(block.validator.clone())
                     .or_insert(HashMap::new())
@@ -351,12 +456,42 @@ impl MethaloxChain {
     }
 }
 
+// RPC Interface for Transaction Submission
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
     let node_secret_seed = [42u8; 32];
 
     let chain = Arc::new(Mutex::new(MethaloxChain::new(node_address.clone(), node_secret_seed)));
+
+    // Start RPC server on localhost
+    let rpc_chain = chain.clone();
+    tokio::spawn(async move {
+        let server = ServerBuilder::default().build("127.0.0.1:9933").await.unwrap();
+        let mut module = RpcModule::new(());
+        module.register_async_method("submit_tx", {
+            let rpc_chain = rpc_chain.clone();
+            move |params, _| {
+                Box::pin({
+                    let chain_for_async = rpc_chain.clone();
+                    async move {
+                        let tx_bytes = match params.one::<Vec<u8>>() {
+                            Ok(b) => b,
+                            Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid params".to_string())),
+                        };
+                        let mut chain = chain_for_async.lock().unwrap();
+                        let tx: Transaction = match bincode::deserialize(&tx_bytes) {
+                            Ok(t) => t,
+                            Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
+                        };
+                        chain.tx_pool.push(tx);
+                        Ok("Transaction submitted successfully".to_string())
+                    }
+                })
+            }
+        });
+        server.start(module).unwrap();
+    });
 
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
