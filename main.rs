@@ -31,7 +31,8 @@ use schnorrkel::{
     vrf::{VRFOutput, VRFProof},
 };
 
-use ed25519_dalek::{PublicKey as EdPublicKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::ed25519::PublicKey as EdPublicKey; // submodule import — crushes E0432 in v2.2.0
 
 use jsonrpsee::server::{ServerBuilder, RpcModule};
 
@@ -50,13 +51,13 @@ enum TransactionKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Transaction {
-    from: String,              // hex-encoded 32-byte ed25519 public key
+    from: String,
     to: String,
     amount: u64,
     kind: TransactionKind,
-    signature: Vec<u8>,        // 64-byte ed25519 signature
+    signature: Vec<u8>,
     timestamp: u64,
-    nonce: u64,                // prevents replay & double-spend
+    nonce: u64,
     commitment: String,
     blinding_factor: u64,
     asset: String,
@@ -76,9 +77,10 @@ struct Block {
     vrf_output: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct MethaloxChain {
     blocks: Vec<Block>,
-    balances: HashMap<String, HashMap<String, (u64, u64)>>, // address -> asset -> (amount, nonce)
+    balances: HashMap<String, HashMap<String, (u64, u64)>>,
     treasury: HashMap<String, u64>,
     xsx_circulating: u64,
     tx_pool: Vec<Transaction>,
@@ -195,9 +197,8 @@ impl MethaloxChain {
     }
 
     fn validate_tx(&self, tx: &Transaction) -> Result<(), String> {
-        // 1. Signature verification (ed25519)
         let mut tx_for_signing = tx.clone();
-        tx_for_signing.signature = vec![0u8; 64]; // zero out signature field
+        tx_for_signing.signature = vec![0u8; 64];
         let message = bincode::serialize(&tx_for_signing).map_err(|_| "Serialization failed")?;
 
         let sig_bytes: [u8; 64] = tx.signature.clone().try_into().map_err(|_| "Invalid signature length")?;
@@ -211,7 +212,6 @@ impl MethaloxChain {
 
         public_key.verify(&message, &signature).map_err(|_| "Invalid signature")?;
 
-        // 2. Nonce check
         let (balance, expected_nonce) = self.balances
             .get(&tx.from)
             .and_then(|m| m.get(&tx.asset))
@@ -222,7 +222,6 @@ impl MethaloxChain {
             return Err("Invalid nonce".to_string());
         }
 
-        // 3. Balance check
         let fee = tx.amount * TX_FEE_BPS / 10000;
         if balance < tx.amount + fee {
             return Err("Insufficient balance".to_string());
@@ -274,8 +273,12 @@ impl MethaloxChain {
             return None;
         }
 
+        // Snapshot to avoid borrow conflict
+        let tx_pool_snapshot = self.tx_pool.clone();
+        self.tx_pool.clear();
+
         let mut valid_txs = Vec::new();
-        for tx in self.tx_pool.drain(..) {
+        for tx in tx_pool_snapshot {
             if self.validate_tx(&tx).is_ok() {
                 valid_txs.push(tx);
             } else {
@@ -374,7 +377,7 @@ impl MethaloxChain {
             }
 
             for tx in &block.transactions {
-                if let Err(e) = self.validate_tx(tx) {
+                if let Err(e) = self.validate_tx(&tx) {
                     println!("Invalid tx in accepted block: {}", e);
                     continue;
                 }
@@ -412,7 +415,7 @@ impl MethaloxChain {
     }
 }
 
-// RPC Interface for Transaction Submission
+// RPC Interface for Transaction Submission — PUBLIC BIND
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
@@ -420,14 +423,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let chain = Arc::new(Mutex::new(MethaloxChain::new(node_address.clone(), node_secret_seed)));
 
-    // Start RPC server on localhost
+    // Start RPC server — PUBLIC BIND
     let rpc_chain = chain.clone();
     tokio::spawn(async move {
-        let server = ServerBuilder::default().build("127.0.0.1:9933").await.unwrap();
-        let mut module = RpcModule::new(());
-        module.register_async_method("submit_tx", {
+        let server = ServerBuilder::default().build("0.0.0.0:9933").await.unwrap();
+        let mut module = RpcModule::new();
+        let _ = module.register_async_method("submit_tx", {
             let rpc_chain = rpc_chain.clone();
             move |params, _| {
+                let rpc_chain = rpc_chain.clone(); // Nested clone fixes E0507
                 Box::pin(async move {
                     let tx_bytes = match params.one::<Vec<u8>>() {
                         Ok(b) => b,
@@ -435,19 +439,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let chain = rpc_chain.clone();
                     let chain_guard = chain.lock().unwrap();
-
                     let tx: Transaction = match bincode::deserialize(&tx_bytes) {
                         Ok(t) => t,
                         Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
                     };
-
                     if let Err(e) = chain_guard.validate_tx(&tx) {
                         return Err(jsonrpsee::core::Error::Custom(e));
                     }
-
-                    drop(chain_guard); // release lock before mutating
+                    drop(chain_guard);
                     chain.lock().unwrap().tx_pool.push(tx);
-
                     Ok("Transaction submitted successfully".to_string())
                 })
             }

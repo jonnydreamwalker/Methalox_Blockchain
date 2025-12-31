@@ -14,3 +14,4 @@ sha2 = "0.10"
 schnorrkel = "0.9"
 rand = "0.8"
 jsonrpsee = { version = "0.16", features = ["server"] }
+ed25519-dalek = { version = "2.1", features = ["serde"] }

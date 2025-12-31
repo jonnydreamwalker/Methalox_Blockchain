@@ -31,6 +31,10 @@ use schnorrkel::{
     vrf::{VRFOutput, VRFProof},
 };
 
+use ed25519_dalek as dalek; // Crate alias — crushes all shadowing
+use dalek::{Signature, Verifier};
+use dalek::VerifyingKey as EdPublicKey; // v2.2.0 uses VerifyingKey for public key
+
 use jsonrpsee::server::{ServerBuilder, RpcModule};
 
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
@@ -52,8 +56,9 @@ struct Transaction {
     to: String,
     amount: u64,
     kind: TransactionKind,
-    signature: String,
+    signature: Vec<u8>,
     timestamp: u64,
+    nonce: u64,
     commitment: String,
     blinding_factor: u64,
     asset: String,
@@ -73,9 +78,10 @@ struct Block {
     vrf_output: Vec<u8>,
 }
 
+#[allow(dead_code)]
 struct MethaloxChain {
     blocks: Vec<Block>,
-    balances: HashMap<String, HashMap<String, u64>>,
+    balances: HashMap<String, HashMap<String, (u64, u64)>>,
     treasury: HashMap<String, u64>,
     xsx_circulating: u64,
     tx_pool: Vec<Transaction>,
@@ -111,7 +117,7 @@ impl MethaloxChain {
         let mut balances = HashMap::new();
         balances.insert(
             FOUNDER_ADDRESS.to_string(),
-            [("XSX".to_string(), 2_100_000_000u64)].into_iter().collect(),
+            [("XSX".to_string(), (2_100_000_000u64, 0u64))].into_iter().collect(),
         );
 
         let mut validators = HashSet::new();
@@ -191,6 +197,52 @@ impl MethaloxChain {
         pubkey.vrf_verify(transcript, &pre_output, &proof).is_ok()
     }
 
+    fn validate_tx(&self, tx: &Transaction) -> Result<(), String> {
+        let mut tx_for_signing = tx.clone();
+        tx_for_signing.signature = vec![0u8; 64];
+        let message = bincode::serialize(&tx_for_signing).map_err(|_| "Serialization failed")?;
+
+        let sig_bytes: [u8; 64] = tx.signature.clone().try_into().map_err(|_| "Invalid signature length")?;
+        let signature = Signature::from_bytes(&sig_bytes);
+
+        let pubkey_bytes: [u8; 32] = hex::decode(&tx.from)
+            .map_err(|_| "Invalid from address (hex)")?
+            .try_into()
+            .map_err(|_| "Invalid public key length")?;
+        let public_key = EdPublicKey::from_bytes(&pubkey_bytes).map_err(|_| "Invalid public key")?;
+
+        public_key.verify(&message, &signature).map_err(|_| "Invalid signature")?;
+
+        let (balance, expected_nonce) = self.balances
+            .get(&tx.from)
+            .and_then(|m| m.get(&tx.asset))
+            .copied()
+            .unwrap_or((0, 0));
+
+        if tx.nonce != expected_nonce + 1 {
+            return Err("Invalid nonce".to_string());
+        }
+
+        let fee = tx.amount * TX_FEE_BPS / 10000;
+        if balance < tx.amount + fee {
+            return Err("Insufficient balance".to_string());
+        }
+
+        Ok(())
+    }
+
+    fn get_balance_mut<'a>(
+        balances: &'a mut HashMap<String, HashMap<String, (u64, u64)>>,
+        address: &str,
+        asset: &str,
+    ) -> &'a mut (u64, u64) {
+        balances
+            .entry(address.to_string())
+            .or_insert(HashMap::new())
+            .entry(asset.to_string())
+            .or_insert((0, 0))
+    }
+
     const TAIL_REWARD: u64 = 1;
 
     fn create_block_if_leader(&mut self) -> Option<Vec<u8>> {
@@ -222,65 +274,35 @@ impl MethaloxChain {
             return None;
         }
 
-        let txs = self.tx_pool.drain(..).collect::<Vec<_>>();
+        // Snapshot to avoid borrow conflict
+        let tx_pool_snapshot = self.tx_pool.clone();
+        self.tx_pool.clear();
 
-        // Process staking transactions
-        for tx in &txs {
-            if let TransactionKind::Stake { amount, vrf_pubkey } = &tx.kind {
-                if tx.asset == "XSX" && tx.from == tx.to {
-                    let balance = self.balances
-                        .get(&tx.from)
-                        .and_then(|m| m.get("XSX"))
-                        .copied()
-                        .unwrap_or(0);
-                    if balance >= *amount {
-                        *self.balances
-                            .entry(tx.from.clone())
-                            .or_insert(HashMap::new())
-                            .entry("XSX".to_string())
-                            .or_insert(0) -= amount;
-                        *self.staked.entry(tx.from.clone()).or_insert(0) += amount;
-                        if let Ok(pubkey) = PublicKey::from_bytes(vrf_pubkey) {
-                            self.vrf_public_keys.insert(tx.from.clone(), pubkey);
-                        }
-                        self.validators.insert(tx.from.clone());
-                        println!("Validator {} staked {} XSX", tx.from, amount);
-                    }
-                }
-            }
-        }
-
-        // Process transfers
-        for tx in &txs {
-            if matches!(tx.kind, TransactionKind::Transfer) {
-                let balance = self.balances
-                    .get(&tx.from)
-                    .and_then(|m| m.get(&tx.asset))
-                    .copied()
-                    .unwrap_or(0);
-                let fee = tx.amount * TX_FEE_BPS / 10000;
-                if balance >= tx.amount + fee {
-                    *self.balances
-                        .entry(tx.from.clone())
-                        .or_insert(HashMap::new())
-                        .entry(tx.asset.clone())
-                        .or_insert(0) -= tx.amount + fee;
-                    *self.balances
-                        .entry(tx.to.clone())
-                        .or_insert(HashMap::new())
-                        .entry(tx.asset.clone())
-                        .or_insert(0) += tx.amount;
-                    println!("Transferred {} {} from {} to {}", tx.amount, tx.asset, tx.from, tx.to);
-                }
+        let mut valid_txs = Vec::new();
+        for tx in tx_pool_snapshot {
+            if self.validate_tx(&tx).is_ok() {
+                valid_txs.push(tx);
+            } else {
+                println!("Dropped invalid tx from pool");
             }
         }
 
         let mut fees_this_block = HashMap::new();
-        for tx in &txs {
+        for tx in &valid_txs {
             if !matches!(tx.kind, TransactionKind::Stake { .. }) {
                 let fee = tx.amount * TX_FEE_BPS / 10000;
                 *fees_this_block.entry(tx.asset.clone()).or_insert(0) += fee;
             }
+
+            let fee = tx.amount * TX_FEE_BPS / 10000;
+            let (balance, _) = Self::get_balance_mut(&mut self.balances, &tx.from, &tx.asset);
+            *balance -= tx.amount + fee;
+
+            let (to_balance, _) = Self::get_balance_mut(&mut self.balances, &tx.to, &tx.asset);
+            *to_balance += tx.amount;
+
+            let (_, nonce) = Self::get_balance_mut(&mut self.balances, &tx.from, &tx.asset);
+            *nonce += 1;
         }
 
         let tail_reward = if self.xsx_circulating < LOWER_THRESHOLD {
@@ -297,7 +319,7 @@ impl MethaloxChain {
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_secs(),
-            transactions: txs,
+            transactions: valid_txs,
             prev_hash: last_block.hash.clone(),
             hash: String::new(),
             validator: self.node_address.clone(),
@@ -314,11 +336,8 @@ impl MethaloxChain {
             self.blocks.push(new_block.clone());
 
             if tail_reward > 0 {
-                *self.balances
-                    .entry(self.node_address.clone())
-                    .or_insert(HashMap::new())
-                    .entry("XSX".to_string())
-                    .or_insert(0) += tail_reward;
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, &self.node_address, "XSX");
+                *balance += tail_reward;
                 self.xsx_circulating += tail_reward;
             }
 
@@ -326,29 +345,18 @@ impl MethaloxChain {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
 
-                *self.balances
-                    .entry(self.node_address.clone())
-                    .or_insert(HashMap::new())
-                    .entry(asset.clone())
-                    .or_insert(0) += validator_share;
+                let (val_balance, _) = Self::get_balance_mut(&mut self.balances, &self.node_address, &asset);
+                *val_balance += validator_share;
 
                 if asset == "XSX" {
                     let burn_amount = (founder_rake as f64 * XSX_BURN_RATE) as u64;
                     let founder_keep = founder_rake - burn_amount;
-
                     println!("Burned {} XSX from founder rake", burn_amount);
-
-                    *self.balances
-                        .entry(FOUNDER_ADDRESS.to_string())
-                        .or_insert(HashMap::new())
-                        .entry(asset)
-                        .or_insert(0) += founder_keep;
+                    let (founder_balance, _) = Self::get_balance_mut(&mut self.balances, FOUNDER_ADDRESS, &asset);
+                    *founder_balance += founder_keep;
                 } else {
-                    *self.balances
-                        .entry(FOUNDER_ADDRESS.to_string())
-                        .or_insert(HashMap::new())
-                        .entry(asset)
-                        .or_insert(0) += founder_rake;
+                    let (founder_balance, _) = Self::get_balance_mut(&mut self.balances, FOUNDER_ADDRESS, &asset);
+                    *founder_balance += founder_rake;
                 }
             }
 
@@ -364,99 +372,51 @@ impl MethaloxChain {
             self.blocks.push(block.clone());
 
             if block.tail_reward > 0 {
-                *self.balances
-                    .entry(block.validator.clone())
-                    .or_insert(HashMap::new())
-                    .entry("XSX".to_string())
-                    .or_insert(0) += block.tail_reward;
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, &block.validator, "XSX");
+                *balance += block.tail_reward;
                 self.xsx_circulating += block.tail_reward;
             }
 
-            // Process staking transactions
             for tx in &block.transactions {
-                if let TransactionKind::Stake { amount, vrf_pubkey } = &tx.kind {
-                    if tx.asset == "XSX" && tx.from == tx.to {
-                        let balance = self.balances
-                            .get(&tx.from)
-                            .and_then(|m| m.get("XSX"))
-                            .copied()
-                            .unwrap_or(0);
-                        if balance >= *amount {
-                            *self.balances
-                                .entry(tx.from.clone())
-                                .or_insert(HashMap::new())
-                                .entry("XSX".to_string())
-                                .or_insert(0) -= amount;
-                            *self.staked.entry(tx.from.clone()).or_insert(0) += amount;
-                            if let Ok(pubkey) = PublicKey::from_bytes(vrf_pubkey) {
-                                self.vrf_public_keys.insert(tx.from.clone(), pubkey);
-                            }
-                            self.validators.insert(tx.from.clone());
-                            println!("Applied stake {} XSX for validator {}", amount, tx.from);
-                        }
-                    }
+                if let Err(e) = self.validate_tx(&tx) {
+                    println!("Invalid tx in accepted block: {}", e);
+                    continue;
                 }
-            }
 
-            // Process transfers
-            for tx in &block.transactions {
-                if matches!(tx.kind, TransactionKind::Transfer) {
-                    let balance = self.balances
-                        .get(&tx.from)
-                        .and_then(|m| m.get(&tx.asset))
-                        .copied()
-                        .unwrap_or(0);
-                    let fee = tx.amount * TX_FEE_BPS / 10000;
-                    if balance >= tx.amount + fee {
-                        *self.balances
-                            .entry(tx.from.clone())
-                            .or_insert(HashMap::new())
-                            .entry(tx.asset.clone())
-                            .or_insert(0) -= tx.amount + fee;
-                        *self.balances
-                            .entry(tx.to.clone())
-                            .or_insert(HashMap::new())
-                            .entry(tx.asset.clone())
-                            .or_insert(0) += tx.amount;
-                        println!("Applied transfer {} {} from {} to {}", tx.amount, tx.asset, tx.from, tx.to);
-                    }
-                }
+                let fee = tx.amount * TX_FEE_BPS / 10000;
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, &tx.from, &tx.asset);
+                *balance -= tx.amount + fee;
+
+                let (to_balance, _) = Self::get_balance_mut(&mut self.balances, &tx.to, &tx.asset);
+                *to_balance += tx.amount;
+
+                let (_, nonce) = Self::get_balance_mut(&mut self.balances, &tx.from, &tx.asset);
+                *nonce += 1;
             }
 
             for (asset, total_fee) in block.fees_collected {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
 
-                *self.balances
-                    .entry(block.validator.clone())
-                    .or_insert(HashMap::new())
-                    .entry(asset.clone())
-                    .or_insert(0) += validator_share;
+                let (val_balance, _) = Self::get_balance_mut(&mut self.balances, &block.validator, &asset);
+                *val_balance += validator_share;
 
                 if asset == "XSX" {
                     let burn_amount = (founder_rake as f64 * XSX_BURN_RATE) as u64;
                     let founder_keep = founder_rake - burn_amount;
-
                     println!("Burned {} XSX from founder rake", burn_amount);
-
-                    *self.balances
-                        .entry(FOUNDER_ADDRESS.to_string())
-                        .or_insert(HashMap::new())
-                        .entry(asset)
-                        .or_insert(0) += founder_keep;
+                    let (founder_balance, _) = Self::get_balance_mut(&mut self.balances, FOUNDER_ADDRESS, &asset);
+                    *founder_balance += founder_keep;
                 } else {
-                    *self.balances
-                        .entry(FOUNDER_ADDRESS.to_string())
-                        .or_insert(HashMap::new())
-                        .entry(asset)
-                        .or_insert(0) += founder_rake;
+                    let (founder_balance, _) = Self::get_balance_mut(&mut self.balances, FOUNDER_ADDRESS, &asset);
+                    *founder_balance += founder_rake;
                 }
             }
         }
     }
 }
 
-// RPC Interface for Transaction Submission
+// RPC Interface for Transaction Submission — PUBLIC BIND
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
@@ -464,29 +424,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let chain = Arc::new(Mutex::new(MethaloxChain::new(node_address.clone(), node_secret_seed)));
 
-    // Start RPC server on localhost
+    // Start RPC server — PUBLIC BIND
     let rpc_chain = chain.clone();
     tokio::spawn(async move {
-        let server = ServerBuilder::default().build("127.0.0.1:9933").await.unwrap();
-        let mut module = RpcModule::new(());
-        module.register_async_method("submit_tx", {
+        let server = ServerBuilder::default().build("0.0.0.0:9933").await.unwrap();
+        let mut module = RpcModule::new(()); // () for jsonrpsee 0.16+
+        let _ = module.register_async_method("submit_tx", {
             let rpc_chain = rpc_chain.clone();
             move |params, _| {
-                Box::pin({
-                    let chain_for_async = rpc_chain.clone();
-                    async move {
-                        let tx_bytes = match params.one::<Vec<u8>>() {
-                            Ok(b) => b,
-                            Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid params".to_string())),
-                        };
-                        let mut chain = chain_for_async.lock().unwrap();
-                        let tx: Transaction = match bincode::deserialize(&tx_bytes) {
-                            Ok(t) => t,
-                            Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
-                        };
-                        chain.tx_pool.push(tx);
-                        Ok("Transaction submitted successfully".to_string())
+                let rpc_chain = rpc_chain.clone(); // Nested clone fixes E0507
+                Box::pin(async move {
+                    let tx_bytes = match params.one::<Vec<u8>>() {
+                        Ok(b) => b,
+                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid params".to_string())),
+                    };
+                    let chain = rpc_chain.clone();
+                    let chain_guard = chain.lock().unwrap();
+                    let tx: Transaction = match bincode::deserialize(&tx_bytes) {
+                        Ok(t) => t,
+                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
+                    };
+                    if let Err(e) = chain_guard.validate_tx(&tx) {
+                        return Err(jsonrpsee::core::Error::Custom(e));
                     }
+                    drop(chain_guard);
+                    chain.lock().unwrap().tx_pool.push(tx);
+                    Ok("Transaction submitted successfully".to_string())
                 })
             }
         });
