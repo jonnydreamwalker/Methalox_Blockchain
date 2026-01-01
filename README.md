@@ -24,6 +24,8 @@ The core node implementation is designed for efficiency, security, and long-term
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source $HOME/.cargo/env
 
+   (this is an onging live computer science project...it will be evolivng. Please, allow time for all documents related to shoftware and applacations of the project time to reflect any changes made.)
+
 **IMPORTANT LEGAL DISCLAIMER – READ CAREFULLY**
 
 MethaloxChain is experimental software and a technological research project. All materials, including this document, the repository, and associated code, are provided "as is" for informational and educational purposes only.
