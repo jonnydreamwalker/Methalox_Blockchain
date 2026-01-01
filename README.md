@@ -1,4 +1,4 @@
-# MethaloxChain
+# MethaloxChain (this is an onging live computer science project...it will be evolivng. Please, allow time for all documents related to shoftware and applacations of the project time to reflect any changes made.)
 
 **MethaloxChain** is a high-performance Layer 1 blockchain protocol featuring VRF-based Proof-of-Stake consensus, 1-second block intervals, a 105 billion XSX fixed floating supply cap with dynamic tail emission, differential transaction fee burn, and native multi-asset support.
 
