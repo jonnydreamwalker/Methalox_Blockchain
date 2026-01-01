@@ -1,1 +1,4 @@
 target/
+.DS_Store
+methalox.log
+chain_state.bin

@@ -42,15 +42,9 @@ const STATE_FILE: &str = "chain_state.bin";
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
 const TX_FEE_BPS: u64 = 10; // 0.1%
 const SUPPLY_CAP: u64 = 105_000_000_000;
-const LOWER_THRESHOLD: u64 = (SUPPLY_CAP as f64 * 0.95) as u64; // 95%
+const LOWER_THRESHOLD: u64 = (SUPPLY_CAP as f64 * 0.95) as u64; // 95% for resupply
 const FOUNDER_ADDRESS: &str = "0x0e5f08ed743d1c6d9745f590e9850fd5169d8be2";
-
-// Changed from 0.999 (99.9% burn) → 0.01 (1% burn on founder XSX rake)
-const XSX_BURN_RATE: f64 = 0.01;
-
-// New tail reward parameters
-const BASE_TAIL_REWARD: u64 = 50;               // small constant base
-const CAP_TO_MINT_RATIO: u64 = 10_000_000;       // for every 10M burned below cap, mint extra
+const XSX_BURN_RATE: f64 = 0.999; // 99.9% burn on founder XSX rake
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum TransactionKind {
@@ -81,6 +75,7 @@ struct Block {
     hash: String,
     validator: String,
     fees_collected: HashMap<String, u64>,
+    tail_reward: u64,
     vrf_proof: Vec<u8>,
     vrf_output: Vec<u8>,
 }
@@ -127,6 +122,7 @@ impl MethaloxChain {
             hash: String::new(),
             validator: FOUNDER_ADDRESS.to_string(),
             fees_collected: HashMap::new(),
+            tail_reward: 0,
             vrf_proof: vec![],
             vrf_output: vec![],
         };
@@ -180,6 +176,7 @@ impl MethaloxChain {
             vrf_public_keys.insert(addr, pk);
         }
 
+        // Validate saved node VRF key matches regenerated
         assert_eq!(node_vrf_public.to_bytes().to_vec(), state.node_vrf_public_bytes);
 
         Self {
@@ -308,31 +305,7 @@ impl MethaloxChain {
             .or_insert((0, 0))
     }
 
-    // New: calculate and distribute tail reward pro-rata to all stakers
-    fn distribute_tail_reward(&mut self) {
-        let total_stake: u64 = self.staked.values().sum();
-        if total_stake == 0 {
-            return;
-        }
-
-        let shortfall = SUPPLY_CAP.saturating_sub(self.xsx_circulating);
-        let dynamic = shortfall / CAP_TO_MINT_RATIO;
-        let tail_reward_total = BASE_TAIL_REWARD + dynamic;
-
-        if tail_reward_total == 0 {
-            return;
-        }
-
-        for (addr, stake) in &self.staked {
-            let share = (tail_reward_total * *stake) / total_stake;
-            if share > 0 {
-                let (balance, _) = Self::get_balance_mut(&mut self.balances, addr, "XSX");
-                *balance += share;
-            }
-        }
-
-        self.xsx_circulating += tail_reward_total;
-    }
+    const TAIL_REWARD: u64 = 1;
 
     fn create_block_if_leader(&mut self) -> Option<Vec<u8>> {
         let last_block = match self.blocks.last() {
@@ -393,6 +366,14 @@ impl MethaloxChain {
             *nonce += 1;
         }
 
+        let tail_reward = if self.xsx_circulating < LOWER_THRESHOLD {
+            Self::TAIL_REWARD
+        } else if self.xsx_circulating < SUPPLY_CAP {
+            Self::TAIL_REWARD
+        } else {
+            0
+        };
+
         let mut new_block = Block {
             index: last_block.index + 1,
             timestamp: SystemTime::now()
@@ -404,6 +385,7 @@ impl MethaloxChain {
             hash: String::new(),
             validator: self.node_address.clone(),
             fees_collected: fees_this_block.clone(),
+            tail_reward,
             vrf_proof: proof.to_bytes().to_vec(),
             vrf_output: vrf_output_bytes.to_vec(),
         };
@@ -414,7 +396,12 @@ impl MethaloxChain {
             println!("BLOCK PRODUCED #{} by {}", new_block.index, new_block.validator);
             self.blocks.push(new_block.clone());
 
-            // Distribute fees (validator half, founder rake)
+            if tail_reward > 0 {
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, &self.node_address, "XSX");
+                *balance += tail_reward;
+                self.xsx_circulating += tail_reward;
+            }
+
             for (asset, total_fee) in fees_this_block {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
@@ -434,9 +421,6 @@ impl MethaloxChain {
                 }
             }
 
-            // Pro-rata tail reward to ALL stakers
-            self.distribute_tail_reward();
-
             bincode::serialize(&new_block).ok()
         } else {
             None
@@ -447,6 +431,12 @@ impl MethaloxChain {
         if self.validate_block(&block) && block.index as usize == self.blocks.len() {
             println!("Accepted incoming block {} from network (validator: {})", block.index, block.validator);
             self.blocks.push(block.clone());
+
+            if block.tail_reward > 0 {
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, &block.validator, "XSX");
+                *balance += block.tail_reward;
+                self.xsx_circulating += block.tail_reward;
+            }
 
             for tx in &block.transactions {
                 if let Err(e) = self.validate_tx(&tx) {
@@ -483,9 +473,6 @@ impl MethaloxChain {
                     *founder_balance += founder_rake;
                 }
             }
-
-            // Pro-rata tail reward to ALL stakers (same on every node)
-            self.distribute_tail_reward();
         }
     }
 
@@ -509,6 +496,7 @@ fn load_chain(node_address: String, node_secret_seed: [u8; 32]) -> MethaloxChain
     MethaloxChain::new(node_address, node_secret_seed)
 }
 
+// RPC Interface for Transaction Submission — PUBLIC BIND
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
