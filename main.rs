@@ -1,6 +1,7 @@
 // בָּרוּךְ שֵׁם יֵשׁוּעַ הַמָּשִׁיחַ
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,7 @@ use libp2p::{
 };
 use libp2p::core::upgrade;
 
+use tokio::signal;
 use tokio::time;
 
 use bincode;
@@ -31,17 +33,24 @@ use schnorrkel::{
     vrf::{VRFOutput, VRFProof},
 };
 
-use ed25519_dalek::{Signature, Verifier};
-use ed25519_dalek::ed25519::PublicKey as EdPublicKey; // submodule import — crushes E0432 in v2.2.0
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use jsonrpsee::server::{ServerBuilder, RpcModule};
+
+const STATE_FILE: &str = "chain_state.bin";
 
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
 const TX_FEE_BPS: u64 = 10; // 0.1%
 const SUPPLY_CAP: u64 = 105_000_000_000;
-const LOWER_THRESHOLD: u64 = (SUPPLY_CAP as f64 * 0.95) as u64; // 95% for resupply
+const LOWER_THRESHOLD: u64 = (SUPPLY_CAP as f64 * 0.95) as u64; // 95%
 const FOUNDER_ADDRESS: &str = "0x0e5f08ed743d1c6d9745f590e9850fd5169d8be2";
-const XSX_BURN_RATE: f64 = 0.999; // 99.9% burn on founder XSX rake
+
+// Changed from 0.999 (99.9% burn) → 0.01 (1% burn on founder XSX rake)
+const XSX_BURN_RATE: f64 = 0.01;
+
+// New tail reward parameters
+const BASE_TAIL_REWARD: u64 = 50;               // small constant base
+const CAP_TO_MINT_RATIO: u64 = 10_000_000;       // for every 10M burned below cap, mint extra
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum TransactionKind {
@@ -72,12 +81,23 @@ struct Block {
     hash: String,
     validator: String,
     fees_collected: HashMap<String, u64>,
-    tail_reward: u64,
     vrf_proof: Vec<u8>,
     vrf_output: Vec<u8>,
 }
 
-#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct MethaloxChainState {
+    blocks: Vec<Block>,
+    balances: HashMap<String, HashMap<String, (u64, u64)>>,
+    treasury: HashMap<String, u64>,
+    xsx_circulating: u64,
+    tx_pool: Vec<Transaction>,
+    validators: HashSet<String>,
+    staked: HashMap<String, u64>,
+    vrf_public_keys: HashMap<String, Vec<u8>>,
+    node_vrf_public_bytes: Vec<u8>,
+}
+
 struct MethaloxChain {
     blocks: Vec<Block>,
     balances: HashMap<String, HashMap<String, (u64, u64)>>,
@@ -107,7 +127,6 @@ impl MethaloxChain {
             hash: String::new(),
             validator: FOUNDER_ADDRESS.to_string(),
             fees_collected: HashMap::new(),
-            tail_reward: 0,
             vrf_proof: vec![],
             vrf_output: vec![],
         };
@@ -147,6 +166,53 @@ impl MethaloxChain {
             node_address,
             node_secret,
             node_vrf_public,
+        }
+    }
+
+    fn from_state(state: MethaloxChainState, node_secret_seed: [u8; 32], node_address: String) -> Self {
+        let mini_secret = MiniSecretKey::from_bytes(&node_secret_seed).unwrap();
+        let node_secret = mini_secret.expand(ExpansionMode::Ed25519);
+        let node_vrf_public = node_secret.to_public();
+
+        let mut vrf_public_keys = HashMap::new();
+        for (addr, bytes) in state.vrf_public_keys {
+            let pk = PublicKey::from_bytes(&bytes).expect("Invalid saved VRF public key");
+            vrf_public_keys.insert(addr, pk);
+        }
+
+        assert_eq!(node_vrf_public.to_bytes().to_vec(), state.node_vrf_public_bytes);
+
+        Self {
+            blocks: state.blocks,
+            balances: state.balances,
+            treasury: state.treasury,
+            xsx_circulating: state.xsx_circulating,
+            tx_pool: state.tx_pool,
+            validators: state.validators,
+            staked: state.staked,
+            vrf_public_keys,
+            node_address,
+            node_secret,
+            node_vrf_public,
+        }
+    }
+
+    fn to_state(&self) -> MethaloxChainState {
+        let mut vrf_bytes = HashMap::new();
+        for (addr, pk) in &self.vrf_public_keys {
+            vrf_bytes.insert(addr.clone(), pk.to_bytes().to_vec());
+        }
+
+        MethaloxChainState {
+            blocks: self.blocks.clone(),
+            balances: self.balances.clone(),
+            treasury: self.treasury.clone(),
+            xsx_circulating: self.xsx_circulating,
+            tx_pool: self.tx_pool.clone(),
+            validators: self.validators.clone(),
+            staked: self.staked.clone(),
+            vrf_public_keys: vrf_bytes,
+            node_vrf_public_bytes: self.node_vrf_public.to_bytes().to_vec(),
         }
     }
 
@@ -208,7 +274,7 @@ impl MethaloxChain {
             .map_err(|_| "Invalid from address (hex)")?
             .try_into()
             .map_err(|_| "Invalid public key length")?;
-        let public_key = EdPublicKey::from_bytes(&pubkey_bytes).map_err(|_| "Invalid public key")?;
+        let public_key = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| "Invalid public key")?;
 
         public_key.verify(&message, &signature).map_err(|_| "Invalid signature")?;
 
@@ -242,7 +308,31 @@ impl MethaloxChain {
             .or_insert((0, 0))
     }
 
-    const TAIL_REWARD: u64 = 1;
+    // New: calculate and distribute tail reward pro-rata to all stakers
+    fn distribute_tail_reward(&mut self) {
+        let total_stake: u64 = self.staked.values().sum();
+        if total_stake == 0 {
+            return;
+        }
+
+        let shortfall = SUPPLY_CAP.saturating_sub(self.xsx_circulating);
+        let dynamic = shortfall / CAP_TO_MINT_RATIO;
+        let tail_reward_total = BASE_TAIL_REWARD + dynamic;
+
+        if tail_reward_total == 0 {
+            return;
+        }
+
+        for (addr, stake) in &self.staked {
+            let share = (tail_reward_total * *stake) / total_stake;
+            if share > 0 {
+                let (balance, _) = Self::get_balance_mut(&mut self.balances, addr, "XSX");
+                *balance += share;
+            }
+        }
+
+        self.xsx_circulating += tail_reward_total;
+    }
 
     fn create_block_if_leader(&mut self) -> Option<Vec<u8>> {
         let last_block = match self.blocks.last() {
@@ -273,7 +363,6 @@ impl MethaloxChain {
             return None;
         }
 
-        // Snapshot to avoid borrow conflict
         let tx_pool_snapshot = self.tx_pool.clone();
         self.tx_pool.clear();
 
@@ -304,14 +393,6 @@ impl MethaloxChain {
             *nonce += 1;
         }
 
-        let tail_reward = if self.xsx_circulating < LOWER_THRESHOLD {
-            Self::TAIL_REWARD
-        } else if self.xsx_circulating < SUPPLY_CAP {
-            Self::TAIL_REWARD
-        } else {
-            0
-        };
-
         let mut new_block = Block {
             index: last_block.index + 1,
             timestamp: SystemTime::now()
@@ -323,7 +404,6 @@ impl MethaloxChain {
             hash: String::new(),
             validator: self.node_address.clone(),
             fees_collected: fees_this_block.clone(),
-            tail_reward,
             vrf_proof: proof.to_bytes().to_vec(),
             vrf_output: vrf_output_bytes.to_vec(),
         };
@@ -334,12 +414,7 @@ impl MethaloxChain {
             println!("BLOCK PRODUCED #{} by {}", new_block.index, new_block.validator);
             self.blocks.push(new_block.clone());
 
-            if tail_reward > 0 {
-                let (balance, _) = Self::get_balance_mut(&mut self.balances, &self.node_address, "XSX");
-                *balance += tail_reward;
-                self.xsx_circulating += tail_reward;
-            }
-
+            // Distribute fees (validator half, founder rake)
             for (asset, total_fee) in fees_this_block {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
@@ -359,6 +434,9 @@ impl MethaloxChain {
                 }
             }
 
+            // Pro-rata tail reward to ALL stakers
+            self.distribute_tail_reward();
+
             bincode::serialize(&new_block).ok()
         } else {
             None
@@ -369,12 +447,6 @@ impl MethaloxChain {
         if self.validate_block(&block) && block.index as usize == self.blocks.len() {
             println!("Accepted incoming block {} from network (validator: {})", block.index, block.validator);
             self.blocks.push(block.clone());
-
-            if block.tail_reward > 0 {
-                let (balance, _) = Self::get_balance_mut(&mut self.balances, &block.validator, "XSX");
-                *balance += block.tail_reward;
-                self.xsx_circulating += block.tail_reward;
-            }
 
             for tx in &block.transactions {
                 if let Err(e) = self.validate_tx(&tx) {
@@ -411,45 +483,56 @@ impl MethaloxChain {
                     *founder_balance += founder_rake;
                 }
             }
+
+            // Pro-rata tail reward to ALL stakers (same on every node)
+            self.distribute_tail_reward();
+        }
+    }
+
+    fn save_to_disk(&self) {
+        let state = self.to_state();
+        if let Ok(encoded) = bincode::serialize(&state) {
+            let _ = fs::write(STATE_FILE, encoded);
+            println!("Chain state saved to {}", STATE_FILE);
         }
     }
 }
 
-// RPC Interface for Transaction Submission — PUBLIC BIND
+fn load_chain(node_address: String, node_secret_seed: [u8; 32]) -> MethaloxChain {
+    if let Ok(data) = fs::read(STATE_FILE) {
+        if let Ok(state) = bincode::deserialize::<MethaloxChainState>(&data) {
+            println!("Chain state loaded from {}", STATE_FILE);
+            return MethaloxChain::from_state(state, node_secret_seed, node_address);
+        }
+    }
+    println!("No saved state found — starting fresh genesis");
+    MethaloxChain::new(node_address, node_secret_seed)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_address = "node_001".to_string();
     let node_secret_seed = [42u8; 32];
 
-    let chain = Arc::new(Mutex::new(MethaloxChain::new(node_address.clone(), node_secret_seed)));
+    let chain = Arc::new(Mutex::new(load_chain(node_address.clone(), node_secret_seed)));
 
-    // Start RPC server — PUBLIC BIND
     let rpc_chain = chain.clone();
+
     tokio::spawn(async move {
         let server = ServerBuilder::default().build("0.0.0.0:9933").await.unwrap();
-        let mut module = RpcModule::new();
-        let _ = module.register_async_method("submit_tx", {
+        let mut module = RpcModule::new(());
+        let _ = module.register_async_method("submit_tx", move |params, _| {
             let rpc_chain = rpc_chain.clone();
-            move |params, _| {
-                let rpc_chain = rpc_chain.clone(); // Nested clone fixes E0507
-                Box::pin(async move {
-                    let tx_bytes = match params.one::<Vec<u8>>() {
-                        Ok(b) => b,
-                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid params".to_string())),
-                    };
-                    let chain = rpc_chain.clone();
-                    let chain_guard = chain.lock().unwrap();
-                    let tx: Transaction = match bincode::deserialize(&tx_bytes) {
-                        Ok(t) => t,
-                        Err(_) => return Err(jsonrpsee::core::Error::Custom("Invalid transaction format".to_string())),
-                    };
-                    if let Err(e) = chain_guard.validate_tx(&tx) {
-                        return Err(jsonrpsee::core::Error::Custom(e));
-                    }
-                    drop(chain_guard);
-                    chain.lock().unwrap().tx_pool.push(tx);
-                    Ok("Transaction submitted successfully".to_string())
-                })
+            async move {
+                let tx_bytes: Vec<u8> = params.one()?;
+                let mut chain_guard = rpc_chain.lock().unwrap();
+                let tx: Transaction = bincode::deserialize(&tx_bytes)
+                    .map_err(|_| jsonrpsee::core::Error::Custom("Invalid transaction format".to_string()))?;
+                if let Err(e) = chain_guard.validate_tx(&tx) {
+                    return Err(jsonrpsee::core::Error::Custom(e));
+                }
+                chain_guard.tx_pool.push(tx);
+                Ok("Transaction submitted successfully".to_string())
             }
         });
         server.start(module).unwrap();
@@ -469,7 +552,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .heartbeat_interval(Duration::from_secs(10))
         .build()?;
 
-    let mut behaviour: gossipsub::Behaviour<IdentityTransform> = gossipsub::Behaviour::new(
+    let mut behaviour = gossipsub::Behaviour::<IdentityTransform>::new(
         MessageAuthenticity::Signed(local_key.clone()),
         gossipsub_config,
     )?;
@@ -485,6 +568,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic_clone = topic.clone();
 
     let mut interval = time::interval(Duration::from_secs(1));
+
+    let save_chain = chain.clone();
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        println!("Shutting down — saving chain state...");
+        save_chain.lock().unwrap().save_to_disk();
+        std::process::exit(0);
+    });
 
     loop {
         tokio::select! {
