@@ -1,5 +1,0 @@
-target/
-.DS_Store
-*.log
-chain_state.bin
-CACHEDIR.TAG
