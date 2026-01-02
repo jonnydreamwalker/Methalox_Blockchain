@@ -1,4 +1,5 @@
 target/
 .DS_Store
-methalox.log
+*.log
 chain_state.bin
+CACHEDIR.TAG
