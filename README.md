@@ -1,5 +1,5 @@
 
-# MethaloxChain ![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
+# MethaloxChain ***Currently Under Maintenance****  ![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
 
 
 MethaloxChain is a high-performance Layer 1 blockchain protocol featuring VRF-based Proof-of-Stake consensus, configurable block intervals targeting approximately one second, a fixed supply cap of 105 billion XSX coins with controlled dynamic tail emission, differential transaction fee structures, and native multi-asset support. ![XSX Coin ](https://github.com/user-attachments/assets/92620d2c-ae59-4386-810a-63196fe10247)
