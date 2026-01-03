@@ -3,3 +3,6 @@ target/
 *.log
 chain_state.bin
 CACHEDIR.TAG
+*.d
+{}*
+return*
