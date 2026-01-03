@@ -1,3 +1,5 @@
+// בָּרוּךְ שֵׁם יֵשׁוּעַ הַמָּשִׁיחַ
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -40,15 +42,12 @@ const STATE_FILE: &str = "chain_state.bin";
 const VRF_CONTEXT: &[u8] = b"methalox-vrf";
 const TX_FEE_BPS: u64 = 10; // 0.1%
 const SUPPLY_CAP: u64 = 105_000_000_000;
-const LOWER_THRESHOLD: u64 = (SUPPLY_CAP as f64 * 0.95) as u64; // 95%
 const FOUNDER_ADDRESS: &str = "0x0e5f08ed743d1c6d9745f590e9850fd5169d8be2";
 
-// Changed from 0.999 (99.9% burn) → 0.01 (1% burn on founder XSX rake)
-const XSX_BURN_RATE: f64 = 0.01;
+const XSX_BURN_RATE: f64 = 0.01; // 1% burn on founder XSX rake
 
-// New tail reward parameters
-const BASE_TAIL_REWARD: u64 = 50;               // small constant base
-const CAP_TO_MINT_RATIO: u64 = 10_000_000;       // for every 10M below cap, mint extra
+const BASE_TAIL_REWARD: u64 = 50;
+const CAP_TO_MINT_RATIO: u64 = 10_000_000;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum TransactionKind {
@@ -559,10 +558,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fixed port for predictable addressing
     swarm.listen_on("/ip4/0.0.0.0/tcp/4001".parse()?)?;
 
-    // Manual bootstrap dials (replace with actual Peer IDs and IPs from logs)
-    // Example for two nodes:
-    // swarm.dial("/ip4/152.70.130.150/tcp/4001/p2p/<PEER_ID_OF_OTHER_NODE>".parse()?)?;
-    // swarm.dial("/ip4/129.146.143.135/tcp/4001/p2p/<PEER_ID_OF_OTHER_NODE>".parse()?)?;
+    // Optional manual bootstrap dials
+    // Uncomment and replace with known peer multiaddrs to connect to the network
+    // swarm.dial("/ip4/<PUBLIC_IP>/tcp/4001/p2p/<PEER_ID>".parse()?)?;
 
     let chain_clone = chain.clone();
     let topic_clone = topic.clone();
