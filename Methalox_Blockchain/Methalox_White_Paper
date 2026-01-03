@@ -1,0 +1,107 @@
+# MethaloxChain Technical White Paper
+
+## Version 1.0
+**Date**: January 1, 2026  
+**Author**: Jonny Dreamwalker  
+
+## Abstract
+
+MethaloxChain is a high-performance Layer 1 blockchain protocol designed for efficiency, security, and long-term economic sustainability. The native cryptocurrency, XSX, serves as the primary unit of account, medium of exchange, and staking asset within the network. The core node implementation features Verifiable Random Function (VRF)-based Proof-of-Stake consensus, configurable block intervals targeting approximately one second, a fixed supply cap of 105 billion XSX coins, controlled dynamic tail emission, differential transaction fee structures with targeted burn, and native multi-asset support. The system employs libp2p for peer-to-peer networking and provides a public JSON-RPC interface for transaction submission. State persistence is achieved through bincode serialization, ensuring continuity across node restarts.
+
+This document describes the current production-ready implementation, with emphasis on XSX as the native coin of the MethaloxChain blockchain.
+
+## Introduction
+
+MethaloxChain is an independent blockchain protocol developed as a research and technological demonstration project. The node software is written in Rust for performance and safety, leveraging established cryptographic primitives and networking libraries. The protocol prioritizes fast finality, fair leader selection, and a balanced emission schedule to support sustained network participation.
+
+XSX is the native coin of MethaloxChain, used for transaction fees, staking to secure the network, and as the reference asset for economic mechanisms. The implementation is suitable for testnet or early mainnet deployment and is released under the MIT license.
+
+## System Architecture
+
+The node is a single binary (`methalox_end_game`) that handles all core functions:
+
+- Block production and validation
+- Transaction mempool management
+- State maintenance (balances in XSX and other assets, stake in XSX)
+- Peer-to-peer block propagation via libp2p Gossipsub
+- Public RPC server on port 9933 for transaction submission
+- Persistent state storage via bincode serialization to `chain_state.bin`
+
+## Consensus Mechanism
+
+MethaloxChain employs a VRF-based Proof-of-Stake consensus algorithm:
+
+- Stake-weighted random leader selection using schnorrkel VRF, where stake is denominated in XSX coins.
+- Leaders produce blocks containing validated transactions from the mempool.
+- Incoming blocks are validated for chain continuity, hash integrity, and VRF proof correctness before application.
+- Block interval is configurable; the reference implementation targets approximately one second.
+
+## Tokenomics
+
+XSX is the native cryptocurrency of MethaloxChain, with a maximum supply cap of 105,000,000,000 coins.
+
+- **Initial Allocation**: 21,000,000,000 XSX coins pre-mined to the founder address at genesis.
+- **Transaction Fees**: 0.1% of transferred amount, denominated in the respective asset.
+  - 50% awarded to the block-producing validator.
+  - 50% allocated to founder rake, of which 1% of the XSX portion is permanently burned (deflationary mechanism).
+- **Tail Emission**:
+  - Base reward: 50 XSX coins per block.
+  - Dynamic component: Additional XSX minted scaled to supply shortfall from cap (one XSX minted for every 10,000,000 below cap).
+  - Total reward distributed pro-rata to all stakers based on their XSX stake proportion, incentivizing broad network participation and security.
+
+This model balances controlled inflation with deflationary pressure and staking rewards to promote long-term stability and participation in the MethaloxChain network.
+
+## Networking and RPC Interface
+
+- **P2P Layer**: libp2p with TCP transport, Noise authentication, Yamux multiplexing, and Gossipsub on topic "methalox-blocks".
+- **RPC**: JSON-RPC server bound to 0.0.0.0:9933, supporting `submit_tx` for bincode-serialized transactions.
+
+## Persistence and State Management
+
+Full chain state is serialized using bincode and saved to `chain_state.bin` on graceful shutdown (Ctrl+C or signal). On startup, the node attempts to load this file; if successful, it resumes from the saved state. If the file is absent or invalid, a fresh genesis is initialized.
+
+Serialized components include:
+- Block history
+- Balances per address and asset (with XSX as primary)
+- Circulating supply of XSX
+- Transaction mempool
+- Stake amounts in XSX
+- Validator set
+- VRF public keys (as bytes)
+
+Node secret keys are regenerated from seed on each launch and never persisted.
+
+## Deployment and Operation
+
+The node is deployed as a standalone binary on Linux systems. Recommended deployment:
+
+1. Install Rust and dependencies.
+2. Clone the repository from GitHub.
+3. Build with `cargo build --release`.
+4. Launch with `nohup ./target/release/methalox_end_game > methalox.log 2>&1 &`.
+
+Ports 9933 (RPC) and dynamic P2P range (40000–60000) must be open in firewall/security lists for public access.
+
+## Conclusion
+
+MethaloxChain provides a complete, efficient blockchain node implementation with modern consensus, balanced tokenomics centered on the XSX native coin, and robust persistence. The protocol is designed for ongoing development and community contribution.
+
+## IMPORTANT LEGAL DISCLAIMER – READ CAREFULLY
+
+MethaloxChain is experimental software and a technological research project. All materials, including this document, the repository, and associated code, are provided "as is" for informational and educational purposes only.
+
+- **Not Financial Advice or Investment Offer**: MethaloxChain and XSX are not securities, commodities, or investment products. No information herein constitutes financial, investment, legal, tax, or other advice. Participation in the network does not entitle any person to profits, dividends, returns, or any economic benefit.
+
+- **High Risk and No Guarantees**: Blockchain technologies involve substantial risk, including complete loss of value or functionality. There are no representations or warranties (express or implied) regarding performance, security, availability, or future development. The project may be modified, discontinued, or rendered inoperable at any time without notice.
+
+- **Regulatory Compliance**: MethaloxChain is not registered with any financial or securities regulatory authority worldwide. Users are solely responsible for determining and complying with all applicable laws, regulations, and restrictions in their jurisdiction. Use may be prohibited in certain jurisdictions.
+
+- **Liability Limitation**: To the maximum extent permitted by law, the developers, contributors, founders, and associated parties disclaim all liability for any direct, indirect, incidental, consequential, or punitive damages arising from use of MethaloxChain, XSX, or related materials, including but not limited to loss of funds, data, or opportunity.
+
+- **No Reliance**: Users must conduct independent due diligence and not rely on any statement, omission, or implication in project materials.
+
+- **Governing Law**: This disclaimer shall be governed by the laws of Wyoming, United States of America, without regard to conflict of law principles.
+
+By accessing, downloading, using, or participating in MethaloxChain, you acknowledge that you have read, understood, and agree to this disclaimer in its entirety.
+
+**Last updated**: January 1, 2026

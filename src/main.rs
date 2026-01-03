@@ -1,5 +1,3 @@
-// בָּרוּךְ שֵׁם יֵשׁוּעַ הַמָּשִׁיחַ
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -50,7 +48,7 @@ const XSX_BURN_RATE: f64 = 0.01;
 
 // New tail reward parameters
 const BASE_TAIL_REWARD: u64 = 50;               // small constant base
-const CAP_TO_MINT_RATIO: u64 = 10_000_000;       // for every 10M burned below cap, mint extra
+const CAP_TO_MINT_RATIO: u64 = 10_000_000;       // for every 10M below cap, mint extra
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum TransactionKind {
@@ -135,7 +133,7 @@ impl MethaloxChain {
         let mut balances = HashMap::new();
         balances.insert(
             FOUNDER_ADDRESS.to_string(),
-            [("XSX".to_string(), (2_100_000_000u64, 0u64))].into_iter().collect(),
+            [("XSX".to_string(), (21_000_000_000u64, 0u64))].into_iter().collect(),
         );
 
         let mut validators = HashSet::new();
@@ -308,7 +306,6 @@ impl MethaloxChain {
             .or_insert((0, 0))
     }
 
-    // New: calculate and distribute tail reward pro-rata to all stakers
     fn distribute_tail_reward(&mut self) {
         let total_stake: u64 = self.staked.values().sum();
         if total_stake == 0 {
@@ -414,7 +411,6 @@ impl MethaloxChain {
             println!("BLOCK PRODUCED #{} by {}", new_block.index, new_block.validator);
             self.blocks.push(new_block.clone());
 
-            // Distribute fees (validator half, founder rake)
             for (asset, total_fee) in fees_this_block {
                 let validator_share = total_fee / 2;
                 let founder_rake = total_fee - validator_share;
@@ -434,7 +430,6 @@ impl MethaloxChain {
                 }
             }
 
-            // Pro-rata tail reward to ALL stakers
             self.distribute_tail_reward();
 
             bincode::serialize(&new_block).ok()
@@ -484,7 +479,6 @@ impl MethaloxChain {
                 }
             }
 
-            // Pro-rata tail reward to ALL stakers (same on every node)
             self.distribute_tail_reward();
         }
     }
@@ -562,7 +556,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id).build();
 
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    // Fixed port for predictable addressing
+    swarm.listen_on("/ip4/0.0.0.0/tcp/4001".parse()?)?;
+
+    // Manual bootstrap dials (replace with actual Peer IDs and IPs from logs)
+    // Example for two nodes:
+    // swarm.dial("/ip4/152.70.130.150/tcp/4001/p2p/<PEER_ID_OF_OTHER_NODE>".parse()?)?;
+    // swarm.dial("/ip4/129.146.143.135/tcp/4001/p2p/<PEER_ID_OF_OTHER_NODE>".parse()?)?;
 
     let chain_clone = chain.clone();
     let topic_clone = topic.clone();
