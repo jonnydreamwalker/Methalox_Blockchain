@@ -558,9 +558,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fixed port for predictable addressing
     swarm.listen_on("/ip4/0.0.0.0/tcp/4001".parse()?)?;
 
-    // Optional manual bootstrap dials
-    // Uncomment and replace with known peer multiaddrs to connect to the network
-    // swarm.dial("/ip4/<PUBLIC_IP>/tcp/4001/p2p/<PEER_ID>".parse()?)?;
+    // Manual bootstrap dials for multi-node synchronization
+    // Uncomment the lines below and replace with actual Peer IDs from logs to enable connections
+    // swarm.dial("/ip4/129.146.143.135/tcp/4001/p2p/<PEER_ID_FROM_FIRST_NODE>".parse()?)?;
+    // swarm.dial("/ip4/152.70.130.150/tcp/4001/p2p/<PEER_ID_FROM_SECOND_NODE>".parse()?)?;
 
     let chain_clone = chain.clone();
     let topic_clone = topic.clone();
