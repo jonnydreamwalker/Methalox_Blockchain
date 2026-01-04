@@ -3,6 +3,17 @@
 Confidentiality without Complexity: Move any asset privately with 1-second finality. No ZK-proof headaches, just native privacy.
 Deflationary Rake: The only chain where the Founder’s success actively burns the supply, increasing your value.
 
+
+Unlike VC-backed chains, Methalox aligns founder success with token scarcity. Every transaction fee collected by the founder permanently reduces the total circulating supply.
+
+Optimized for AI Agents. Our codebase is structured for immediate context-loading by Cursor, Windsurf, and GitHub Copilot. Get from 'git clone' to a working private transaction in 60 seconds.
+
+Built for the Wyoming Digital Asset Framework. Methalox is engineered to support the 2026 CLARITY Act standards, offering cryptographic privacy for users while maintaining the audit hooks required for institutional compliance.
+
+Beyond XSX: Native support for Tokenized Treasuries, Private Credit, and Stablecoins. Our multi-asset fee engine allows stakers to earn rewards in the same high-value assets used for settlement.
+
+Zero Bloat Architecture. By avoiding the 'Frankenstein' upgrades of legacy chains, Methalox delivers consistent 1s finality with a lean Rust core. See our src/benchmarks for sub-millisecond VRF verification times.
+
  
 ![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
 
