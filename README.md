@@ -2,6 +2,9 @@
 ### *The World's Most Efficient Private Settlement Layer*
 Confidentiality without Complexity: Move any asset privately with 1-second finality. No ZK-proof headaches, just native privacy.
 Deflationary Rake: The only chain where the Founder’s success actively burns the supply, increasing your value.
+![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
+
+
 
 
 Unlike VC-backed chains, Methalox aligns founder success with token scarcity. Every transaction fee collected by the founder permanently reduces the total circulating supply.
@@ -13,9 +16,6 @@ Built for the Wyoming Digital Asset Framework. Methalox is engineered to support
 Beyond XSX: Native support for Tokenized Treasuries, Private Credit, and Stablecoins. Our multi-asset fee engine allows stakers to earn rewards in the same high-value assets used for settlement.
 
 Zero Bloat Architecture. By avoiding the 'Frankenstein' upgrades of legacy chains, Methalox delivers consistent 1s finality with a lean Rust core. See our src/benchmarks for sub-millisecond VRF verification times.
-
- 
-![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
 
 
 MethaloxChain is a high-performance Layer 1 blockchain protocol featuring VRF-based Proof-of-Stake consensus, configurable block intervals targeting approximately one second, a fixed supply cap of 105 billion XSX coins with controlled dynamic tail emission, differential transaction fee structures, and native multi-asset support. ![XSX Coin ](https://github.com/user-attachments/assets/92620d2c-ae59-4386-810a-63196fe10247)
