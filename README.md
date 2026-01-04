@@ -1,5 +1,7 @@
 
 # Methalox Blockchain 
+
+# The World's Most Efficient Private Settlement Layer.
  
 ![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
 
