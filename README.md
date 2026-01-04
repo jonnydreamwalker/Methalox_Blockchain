@@ -1,5 +1,5 @@
 Undergoing Live Testing
-***Awaiting A Maintenance Update!-We are almost Live Ready For You To Run Methalox as a Validator.
+***Awaiting A Maintenance Update!-We Are Almost Live, And Ready For You To Run Methalox as a Validator.$$$
 # Methalox Blockchain (XSX)
 ### *The World's Most Efficient Private Settlement Layer*
 Confidentiality without Complexity: Move any asset privately with 1-second finality. No ZK-proof headaches, just native privacy.
