@@ -4,7 +4,8 @@ Thank you,
  Jonathan B. Roberts 
 # Methalox Blockchain (XSX)
 ### *The World's Most Efficient Private Settlement Layer*
-Confidentiality without Complexity: Move any asset privately with 1-second finality. No ZK-proof headaches, just native privacy.
+Confidentiality without Complexity: Built for Native Privacy
+Move any asset with blazing speed and future-proof privacy architecture. Blinding factors and commitments are already in the transaction struct—native privacy is coming fast, no ZK headaches required. When it's live, you'll have true confidential transfers that just work.
 
 Deflationary Rake: The only chain where the Founder’s success actively burns the supply, increasing your value.
 ![Methalox Logo ](https://github.com/user-attachments/assets/f615e50d-d061-45bc-b555-38bc87c3be9b)
