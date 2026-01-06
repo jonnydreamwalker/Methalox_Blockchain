@@ -17,7 +17,8 @@ Unlike VC-backed chains, Methalox aligns founder success with token scarcity. Ev
 
 Optimized for AI Agents. Our codebase is structured for immediate context-loading by Cursor, Windsurf, and GitHub Copilot. Get from 'git clone' to a working private transaction in 60 seconds.
 
-Built for the Wyoming Digital Asset Framework. Methalox is engineered to support the 2026 CLARITY Act standards, offering cryptographic privacy for users while maintaining the audit hooks required for institutional compliance.
+Engineered for the Wyoming Digital Asset Framework
+Methalox is designed from the ground up to align with emerging standards like the 2026 CLARITY Act. We're building in the hooks for cryptographic privacy + institutional auditability, so when regulation catches up, Methalox is already there—ready for tokenized treasuries, private credit, and real-world adoption.
 
 Beyond XSX: Native support for Tokenized Treasuries, Private Credit, and Stablecoins. Our multi-asset fee engine allows stakers to earn rewards in the same high-value assets used for settlement.
 
@@ -66,7 +67,7 @@ Monitor logs:
 tail -f methalox.log
 ```
 
-Open ports 9933 (RPC) and 40000–60000 (P2P) in your firewall/security list for public access.
+Open ports 9933 (RPC) and 4001 (P2P) in your firewall/security list for full network participation.
 
 ## IMPORTANT LEGAL DISCLAIMER – READ CAREFULLY
 
